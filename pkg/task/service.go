@@ -11,8 +11,11 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	taskapi "github.com/containerd/containerd/api/runtime/task/v3"
+	apitypes "github.com/containerd/containerd/api/types"
+	"github.com/containerd/containerd/v2/core/mount"
 	tasktypes "github.com/containerd/containerd/api/types/task"
 	"github.com/containerd/containerd/v2/pkg/shim"
 	"github.com/containerd/containerd/v2/pkg/shutdown"
@@ -55,7 +58,14 @@ type taskState struct {
 	exitedAt   *timestamppb.Timestamp
 	done       chan struct{}
 	doneOnce   sync.Once
+	startedAt  time.Time
+	rootfsPath string
 }
+
+const (
+	mainPIDPollAttempts = 30
+	mainPIDPollInterval = 100 * time.Millisecond
+)
 
 func newService(publisher shim.Publisher, sd shutdown.Service) *service {
 	return &service{
@@ -78,10 +88,17 @@ func (s *service) Create(_ context.Context, req *taskapi.CreateTaskRequest) (*ta
 	if _, err := loadSpec(req.GetBundle()); err != nil {
 		return nil, fmt.Errorf("load OCI spec: %w", err)
 	}
+	rootfsPath, err := mountRootfs(req.GetBundle(), req.GetRootfs())
+	if err != nil {
+		return nil, fmt.Errorf("mount rootfs: %w", err)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.tasks[req.GetID()]; ok {
+		if rootfsPath != "" {
+			_ = unmountRootfs(rootfsPath)
+		}
 		return nil, errdefs.ErrAlreadyExists
 	}
 	s.tasks[req.GetID()] = &taskState{
@@ -94,6 +111,7 @@ func (s *service) Create(_ context.Context, req *taskapi.CreateTaskRequest) (*ta
 		terminal: req.GetTerminal(),
 		status:   tasktypes.Status_CREATED,
 		done:     make(chan struct{}),
+		rootfsPath: rootfsPath,
 	}
 	return &taskapi.CreateTaskResponse{}, nil
 }
@@ -131,8 +149,10 @@ func (s *service) Start(_ context.Context, req *taskapi.StartRequest) (*taskapi.
 		return nil, err
 	}
 
-	pid, err := s.runner.MainPID(task.unitName)
+	pid, err := s.waitMainPID(task.unitName)
 	if err != nil {
+		_ = s.runner.StopUnit(task.unitName)
+		_ = s.runner.ResetFailed(task.unitName)
 		return nil, err
 	}
 
@@ -143,6 +163,7 @@ func (s *service) Start(_ context.Context, req *taskapi.StartRequest) (*taskapi.
 		s.markStoppedLocked(task, 0)
 		return &taskapi.StartResponse{Pid: 0}, nil
 	}
+	task.startedAt = time.Now()
 	task.status = tasktypes.Status_RUNNING
 	return &taskapi.StartResponse{Pid: pid}, nil
 }
@@ -178,7 +199,13 @@ func (s *service) Delete(_ context.Context, req *taskapi.DeleteRequest) (*taskap
 	resp := &taskapi.DeleteResponse{Pid: task.pid, ExitStatus: task.exitStatus, ExitedAt: task.exitedAt}
 	delete(s.tasks, req.GetID())
 	shouldShutdown := len(s.tasks) == 0 && s.shutdown != nil
+	rootfsPath := task.rootfsPath
 	s.mu.Unlock()
+	if rootfsPath != "" {
+		if err := unmountRootfs(rootfsPath); err != nil {
+			return nil, err
+		}
+	}
 	if shouldShutdown {
 		s.shutdown.Shutdown()
 	}
@@ -352,10 +379,30 @@ func (s *service) reconcileTaskLocked(task *taskState) {
 		return
 	}
 	if pid == 0 {
-		s.markStoppedLocked(task, 0)
 		return
 	}
 	task.pid = pid
+}
+
+func (s *service) waitMainPID(unit string) (uint32, error) {
+	var lastErr error
+	for i := 0; i < mainPIDPollAttempts; i++ {
+		pid, err := s.runner.MainPID(unit)
+		if err == nil && pid > 0 {
+			return pid, nil
+		}
+		if err != nil {
+			lastErr = err
+			if isUnitNotLoadedError(err) {
+				break
+			}
+		}
+		time.Sleep(mainPIDPollInterval)
+	}
+	if lastErr != nil {
+		return 0, lastErr
+	}
+	return 0, nil
 }
 
 func (s *service) markStoppedLocked(task *taskState, exitStatus uint32) {
@@ -421,4 +468,36 @@ func commandFromSpec(spec *specs.Spec, bundle string) ([]string, string, map[str
 		workDir = "/"
 	}
 	return command, workDir, envMap, nil
+}
+
+func mountRootfs(bundle string, rootfs []*apitypes.Mount) (string, error) {
+	if len(rootfs) == 0 {
+		return "", nil
+	}
+	target := filepath.Join(bundle, "rootfs")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return "", err
+	}
+	mounts := make([]mount.Mount, 0, len(rootfs))
+	for _, root := range rootfs {
+		if root == nil {
+			continue
+		}
+		mounts = append(mounts, mount.Mount{
+			Type:    root.GetType(),
+			Source:  root.GetSource(),
+			Options: append([]string{}, root.GetOptions()...),
+		})
+	}
+	if err := mount.All(mounts, target); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+func unmountRootfs(path string) error {
+	if path == "" {
+		return nil
+	}
+	return mount.UnmountAll(path, 0)
 }

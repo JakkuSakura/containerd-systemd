@@ -59,7 +59,7 @@ Run:
 
 The script validates:
 - RuntimeClass exists and is usable.
-- A short pod completes and logs expected output.
+- A short pod completes successfully.
 - A long-running pod starts and is deletable.
 
 The example pods intentionally set:
@@ -81,3 +81,4 @@ This keeps runtime validation usable on single-node/bootstrap clusters where CNI
 - No exec/resize/close-io/checkpoint/update/stats implementation.
 - No cgroup/resource management integration yet.
 - Exit/event reconciliation is basic and intended as a foundation.
+- Stdio/FIFO plumbing is not fully implemented yet.

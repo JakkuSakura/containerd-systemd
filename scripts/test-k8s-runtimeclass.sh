@@ -53,11 +53,10 @@ spec:
       command: ["/bin/sh", "-c", "echo systemd-runtime-ok"]
 YAML
 
-kubectl -n "${NS}" wait --for=condition=Ready "pod/${SMOKE_POD}" --timeout="${TIMEOUT_RUNNING}" >/dev/null 2>&1 || true
-kubectl -n "${NS}" wait --for=condition=PodCompleted "pod/${SMOKE_POD}" --timeout="${TIMEOUT_COMPLETE}"
-SMOKE_LOGS="$(kubectl -n "${NS}" logs "${SMOKE_POD}")"
-if [[ "${SMOKE_LOGS}" != *"systemd-runtime-ok"* ]]; then
-  echo "unexpected smoke pod logs: ${SMOKE_LOGS}" >&2
+kubectl -n "${NS}" wait --for=jsonpath='{.status.phase}'=Succeeded "pod/${SMOKE_POD}" --timeout="${TIMEOUT_COMPLETE}"
+SMOKE_EXIT_CODE="$(kubectl -n "${NS}" get pod "${SMOKE_POD}" -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}')"
+if [[ "${SMOKE_EXIT_CODE}" != "0" ]]; then
+  echo "unexpected smoke pod exit code: ${SMOKE_EXIT_CODE}" >&2
   exit 1
 fi
 

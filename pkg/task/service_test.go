@@ -85,7 +85,7 @@ func TestCommandFromSpecWithRootfsUsesChroot(t *testing.T) {
 	}
 }
 
-func TestStateReconcilesRunningToStoppedWhenPidMissing(t *testing.T) {
+func TestStateKeepsRunningWhenPidMissing(t *testing.T) {
 	svc := newService(nil, nil)
 	svc.runner = &fakeRunner{mainPIDByUnit: map[string]uint32{"u1": 0}}
 	svc.tasks["t1"] = &taskState{
@@ -100,11 +100,28 @@ func TestStateReconcilesRunningToStoppedWhenPidMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("State failed: %v", err)
 	}
+	if state.Status != tasktypes.Status_RUNNING {
+		t.Fatalf("expected RUNNING, got %v", state.Status)
+	}
+}
+
+func TestStateStopsWhenUnitNotLoaded(t *testing.T) {
+	svc := newService(nil, nil)
+	svc.runner = &fakeRunner{mainPIDErr: errors.New("Unit u4.service not loaded")}
+	svc.tasks["t4"] = &taskState{
+		id:       "t4",
+		bundle:   "/tmp/bundle",
+		unitName: "u4",
+		status:   tasktypes.Status_RUNNING,
+		done:     make(chan struct{}),
+	}
+
+	state, err := svc.State(nil, &taskapi.StateRequest{ID: "t4"})
+	if err != nil {
+		t.Fatalf("State failed: %v", err)
+	}
 	if state.Status != tasktypes.Status_STOPPED {
 		t.Fatalf("expected STOPPED, got %v", state.Status)
-	}
-	if state.ExitedAt == nil {
-		t.Fatal("expected ExitedAt to be set")
 	}
 }
 

@@ -123,7 +123,7 @@ func (s *service) Start(_ context.Context, req *taskapi.StartRequest) (*taskapi.
 	if err != nil {
 		return nil, fmt.Errorf("load OCI spec: %w", err)
 	}
-	command, workDir, envMap, err := commandFromSpec(spec)
+	command, workDir, envMap, err := commandFromSpec(spec, task.bundle)
 	if err != nil {
 		return nil, err
 	}
@@ -395,7 +395,7 @@ func loadSpec(bundle string) (*specs.Spec, error) {
 	return &spec, nil
 }
 
-func commandFromSpec(spec *specs.Spec) ([]string, string, map[string]string, error) {
+func commandFromSpec(spec *specs.Spec, bundle string) ([]string, string, map[string]string, error) {
 	if spec == nil || spec.Process == nil {
 		return nil, "", nil, errdefs.ErrInvalidArgument
 	}
@@ -410,6 +410,14 @@ func commandFromSpec(spec *specs.Spec) ([]string, string, map[string]string, err
 	}
 	workDir := spec.Process.Cwd
 	if workDir == "" {
+		workDir = "/"
+	}
+	if spec.Root != nil && spec.Root.Path != "" {
+		rootPath := spec.Root.Path
+		if !filepath.IsAbs(rootPath) {
+			rootPath = filepath.Join(bundle, rootPath)
+		}
+		command = append([]string{"chroot", rootPath}, command...)
 		workDir = "/"
 	}
 	return command, workDir, envMap, nil

@@ -50,7 +50,7 @@ func (f *fakeShutdownService) Err() error                                  { ret
 
 func TestCommandFromSpec(t *testing.T) {
 	spec := &specs.Spec{Process: &specs.Process{Args: []string{"/bin/sh", "-c", "echo ok"}, Cwd: "/work", Env: []string{"A=1", "B=2"}}}
-	cmd, cwd, env, err := commandFromSpec(spec)
+	cmd, cwd, env, err := commandFromSpec(spec, "/tmp/bundle")
 	if err != nil {
 		t.Fatalf("commandFromSpec failed: %v", err)
 	}
@@ -61,6 +61,26 @@ func TestCommandFromSpec(t *testing.T) {
 		t.Fatalf("unexpected cwd: %s", cwd)
 	}
 	if env["A"] != "1" || env["B"] != "2" {
+		t.Fatalf("unexpected env: %#v", env)
+	}
+}
+
+func TestCommandFromSpecWithRootfsUsesChroot(t *testing.T) {
+	spec := &specs.Spec{
+		Process: &specs.Process{Args: []string{"/pause"}, Cwd: "/", Env: []string{"A=1"}},
+		Root:    &specs.Root{Path: "rootfs"},
+	}
+	cmd, cwd, env, err := commandFromSpec(spec, "/bundle/path")
+	if err != nil {
+		t.Fatalf("commandFromSpec failed: %v", err)
+	}
+	if len(cmd) != 3 || cmd[0] != "chroot" || cmd[1] != "/bundle/path/rootfs" || cmd[2] != "/pause" {
+		t.Fatalf("unexpected chroot command: %#v", cmd)
+	}
+	if cwd != "/" {
+		t.Fatalf("unexpected cwd: %s", cwd)
+	}
+	if env["A"] != "1" {
 		t.Fatalf("unexpected env: %#v", env)
 	}
 }
